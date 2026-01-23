@@ -1,10 +1,10 @@
-// index.js (FULL) — License keys (one-key-per-placeId) + ranker/promote + ranker-gamepass (no license)
-// + Cronitor heartbeat (optional) + hard safety (rate limit + timeouts) for multi-group usage
+// index.js (EXP BOT ONLY) — License keys (one-key-per-placeId) + EXP rank sync routes (setrank/promote)
+// ✅ Removed: gamepass route, rate limit, axios, Cronitor, extra safety wrappers
+// ✅ Keep it SIMPLE + separated for EXP bot only
 
 const express = require("express");
 const rbx = require("noblox.js");
 const dotenv = require("dotenv");
-const axios = require("axios");
 
 dotenv.config();
 
@@ -14,19 +14,8 @@ const app = express();
 // **ENV**
 //======================================================
 const COOKIE = process.env.COOKIE;
-
-// **CRONITOR** (optional)
-const CRONITOR_PING_URL = process.env.CRONITOR_PING_URL || ""; // ex: https://cronitor.link/p/xxxxxxxx
-const CRONITOR_INTERVAL_SEC = Number(process.env.CRONITOR_INTERVAL_SEC || 60);
-
-// **RATE LIMIT**
-const MAX_REQ_PER_MIN = Number(process.env.MAX_REQ_PER_MIN || 120);
-
-// **REQUEST TIMEOUT**
-const ACTION_TIMEOUT_MS = Number(process.env.ACTION_TIMEOUT_MS || 12000);
-
 if (!COOKIE) {
-  console.error("❌ Missing **COOKIE** in environment variables");
+  console.error("❌ Missing COOKIE in environment variables");
   process.exit(1);
 }
 
@@ -47,7 +36,7 @@ const VALID_KEYS = new Set([
 ]);
 
 // In-memory bindings: **key -> placeId**
-// Note: restart clears bindings.
+// NOTE: Restart clears bindings.
 const KEY_BINDINGS = new Map();
 
 function validateKeyForPlace(key, placeId) {
@@ -59,7 +48,7 @@ function validateKeyForPlace(key, placeId) {
 
   if (!bound) {
     KEY_BINDINGS.set(key, placeId);
-    console.log(`🔐 Key bound to **PlaceId ${placeId}**`);
+    console.log(`🔐 Key bound to PlaceId ${placeId}`);
     return { ok: true };
   }
 
@@ -84,69 +73,6 @@ function requireLicense(req, res) {
 }
 
 //======================================================
-// **HARD SAFETY** (simple in-memory rate limiter)
-//======================================================
-const RL_BUCKET = new Map(); // ip -> { count, resetAt }
-
-function rateLimit(req, res, next) {
-  const ip =
-    (req.headers["x-forwarded-for"] || "").toString().split(",")[0].trim() ||
-    req.socket.remoteAddress ||
-    "unknown";
-
-  const now = Date.now();
-  const resetEvery = 60_000;
-
-  let b = RL_BUCKET.get(ip);
-  if (!b || now >= b.resetAt) {
-    b = { count: 0, resetAt: now + resetEvery };
-    RL_BUCKET.set(ip, b);
-  }
-
-  b.count += 1;
-
-  if (b.count > MAX_REQ_PER_MIN) {
-    return res.status(429).json({
-      ok: false,
-      error: "RATE_LIMIT",
-      message: "Too many requests. Slow down.",
-    });
-  }
-
-  next();
-}
-
-app.use(rateLimit);
-
-//======================================================
-// **UTIL** timeout wrapper
-//======================================================
-function withTimeout(promise, ms, label = "ACTION") {
-  let t;
-  const timeout = new Promise((_, reject) => {
-    t = setTimeout(() => reject(new Error(`${label}_TIMEOUT`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
-}
-
-//======================================================
-// **CRONITOR** heartbeat (optional)
-//======================================================
-async function pingCronitor() {
-  if (!CRONITOR_PING_URL) return;
-  try {
-    await axios.get(CRONITOR_PING_URL, { timeout: 8000 });
-    // keep logs light
-  } catch (e) {
-    console.warn("⚠️ Cronitor ping failed:", e?.message || e);
-  }
-}
-
-setInterval(() => {
-  pingCronitor();
-}, Math.max(15, CRONITOR_INTERVAL_SEC) * 1000);
-
-//======================================================
 // **BOOT**
 //======================================================
 rbx
@@ -154,11 +80,8 @@ rbx
   .then(() => {
     console.log("✅ Logged in to Roblox");
 
-    // quick startup ping
-    pingCronitor();
-
     app.get("/", (req, res) => {
-      res.send("Roblox Ranker is alive!");
+      res.send("EXP Ranker is alive!");
     });
 
     //==================================================
@@ -180,9 +103,9 @@ rbx
     });
 
     //==================================================
-    // **/ranker** (LICENSE PROTECTED)
+    // **/setrank** (LICENSE PROTECTED)
     //==================================================
-    app.get("/ranker", async (req, res) => {
+    app.get("/setrank", async (req, res) => {
       if (!requireLicense(req, res)) return;
 
       const userId = parseInt(req.query.userid, 10);
@@ -194,11 +117,11 @@ rbx
       }
 
       try {
-        await withTimeout(rbx.setRank(groupId, userId, rank), ACTION_TIMEOUT_MS, "SETRANK");
-        return res.json({ ok: true, success: true, message: `Ranked user ${userId} in group ${groupId}` });
+        await rbx.setRank(groupId, userId, rank);
+        return res.json({ ok: true, success: true });
       } catch (err) {
-        console.error("❌ Failed to rank:", err);
-        return res.status(500).json({ ok: false, error: "RANK_FAILED", message: err.message });
+        console.error("❌ Failed to set rank:", err);
+        return res.status(500).json({ ok: false, error: "SETRANK_FAILED", message: err.message });
       }
     });
 
@@ -216,32 +139,11 @@ rbx
       }
 
       try {
-        await withTimeout(rbx.promote(groupId, userId), ACTION_TIMEOUT_MS, "PROMOTE");
-        return res.json({ ok: true, success: true, message: `Promoted user ${userId} in group ${groupId}` });
+        await rbx.promote(groupId, userId);
+        return res.json({ ok: true, success: true });
       } catch (err) {
         console.error("❌ Failed to promote:", err);
         return res.status(500).json({ ok: false, error: "PROMOTE_FAILED", message: err.message });
-      }
-    });
-
-    //==================================================
-    // **/ranker-gamepass** (NO LICENSE)
-    //==================================================
-    app.get("/ranker-gamepass", async (req, res) => {
-      const userId = parseInt(req.query.userid, 10);
-      const rank = parseInt(req.query.rank, 10);
-      const groupId = parseInt(req.query.groupid, 10);
-
-      if (!Number.isFinite(userId) || !Number.isFinite(rank) || !Number.isFinite(groupId)) {
-        return res.status(400).json({ ok: false, error: "BAD_PARAMS" });
-      }
-
-      try {
-        await withTimeout(rbx.setRank(groupId, userId, rank), ACTION_TIMEOUT_MS, "SETRANK_GP");
-        return res.json({ ok: true, success: true, message: "Ranked via gamepass system" });
-      } catch (err) {
-        console.error("❌ Gamepass rank failed:", err);
-        return res.status(500).json({ ok: false, error: "GAMEPASS_RANK_FAILED", message: err.message });
       }
     });
 
@@ -250,7 +152,7 @@ rbx
     //==================================================
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => {
-      console.log(`🚀 Server is running on port **${PORT}**`);
+      console.log(`🚀 Server is running on port ${PORT}`);
     });
   })
   .catch((err) => {
