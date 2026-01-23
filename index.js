@@ -1,6 +1,6 @@
 // index.js (EXP BOT ONLY) — License keys (one-key-per-placeId) + EXP rank sync route (SETRANK ONLY)
-// ✅ Removed: /promote, gamepass route, rate limit, axios, Cronitor, extra wrappers
-// ✅ Keep it SIMPLE + separated for EXP bot only
+// ✅ Handles: same role, role not found, bot insufficient permissions, demote+promote fast
+// ✅ Keep it SIMPLE + EXP bot only
 
 const express = require("express");
 const rbx = require("noblox.js");
@@ -74,18 +74,84 @@ function requireLicense(req, res) {
 }
 
 //======================================================
-// **OPTIONAL BOT-SIDE SYNC COOLDOWN** (anti-spam safety)
-// Server should still enforce cooldown, this is just a backup.
+// OPTIONAL BOT-SIDE SYNC COOLDOWN (set to 0 to feel instant)
+//======================================================
 const LAST_SYNC_AT = new Map(); // `${placeId}:${groupId}:${userId}` -> ms
-const BOT_SYNC_COOLDOWN_MS = 1500; // 1.5s (tiny, just blocks accidental spam)
+const BOT_SYNC_COOLDOWN_MS = 0; // ✅ set 0 for no delay (recommended)
+
+function inCooldown(k) {
+  if (BOT_SYNC_COOLDOWN_MS <= 0) return false;
+  const now = Date.now();
+  const last = LAST_SYNC_AT.get(k) || 0;
+  if (now - last < BOT_SYNC_COOLDOWN_MS) return true;
+  LAST_SYNC_AT.set(k, now);
+  return false;
+}
+
+//======================================================
+// BOT ID (from cookie session)
+//======================================================
+let BOT_USER_ID = null;
+
+//======================================================
+// Group roles cache: groupId -> { ranks:Set<number>, expiresAt:number }
+//======================================================
+const ROLE_CACHE = new Map();
+const ROLE_CACHE_TTL_MS = 60_000; // 60s
+
+async function getGroupRanks(groupId) {
+  const now = Date.now();
+  const cached = ROLE_CACHE.get(groupId);
+  if (cached && cached.expiresAt > now) return cached.ranks;
+
+  const roles = await rbx.getRoles(groupId); // [{id,name,rank,...}]
+  const ranks = new Set();
+  for (const r of roles) ranks.add(Number(r.rank));
+
+  ROLE_CACHE.set(groupId, { ranks, expiresAt: now + ROLE_CACHE_TTL_MS });
+  return ranks;
+}
+
+//======================================================
+// Helpers
+//======================================================
+function jsonError(res, status, error, extra = {}) {
+  return res.status(status).json({ ok: false, error, ...extra });
+}
+
+function isSameRoleErrorMessage(msg) {
+  const s = String(msg || "").toLowerCase();
+  return s.includes("cannot change the user's role to the same role") || s.includes("same role");
+}
+
+function isRoleNotFoundMessage(msg) {
+  const s = String(msg || "").toLowerCase();
+  return s.includes("role not found");
+}
+
+function isPermissionMessage(msg) {
+  const s = String(msg || "").toLowerCase();
+  return (
+    s.includes("not authorized") ||
+    s.includes("not permitted") ||
+    s.includes("forbidden") ||
+    s.includes("does not have permission") ||
+    s.includes("insufficient")
+  );
+}
 
 //======================================================
 // **BOOT**
 //======================================================
 rbx
   .setCookie(COOKIE)
-  .then(() => {
+  .then(async () => {
     console.log("✅ Logged in to Roblox");
+
+    // Identify bot user id
+    const me = await rbx.getCurrentUser();
+    BOT_USER_ID = Number(me?.UserID || me?.userId || me?.id);
+    console.log(`🤖 Bot UserId = ${BOT_USER_ID}`);
 
     app.get("/", (req, res) => {
       res.send("EXP Bot is alive!");
@@ -93,7 +159,6 @@ rbx
 
     //==================================================
     // **/validate** (license bind on boot)
-    // Roblox calls this once when the server boots
     //==================================================
     app.get("/validate", (req, res) => {
       const key = String(req.query.key ?? "");
@@ -107,13 +172,12 @@ rbx
         });
       }
 
-      // small extra info for debugging (doesn't break anything)
       return res.json({ ok: true, boundPlaceId: placeId });
     });
 
     //==================================================
     // **/setrank** (LICENSE PROTECTED) — EXP -> GROUP RANK SYNC
-    // Works for BOTH promotion + demotion (lower rank is allowed)
+    // Works for BOTH promotion + demotion
     //==================================================
     app.get("/setrank", async (req, res) => {
       const lic = requireLicense(req, res);
@@ -123,37 +187,63 @@ rbx
       const rank = Number(req.query.rank);
       const groupId = Number(req.query.groupid);
 
-      // **PARAM GUARD**
-      if (!Number.isFinite(userId) || userId <= 0) return res.status(400).json({ ok: false, error: "BAD_USERID" });
-      if (!Number.isFinite(groupId) || groupId <= 0) return res.status(400).json({ ok: false, error: "BAD_GROUPID" });
+      // PARAM GUARD
+      if (!Number.isFinite(userId) || userId <= 0) return jsonError(res, 400, "BAD_USERID");
+      if (!Number.isFinite(groupId) || groupId <= 0) return jsonError(res, 400, "BAD_GROUPID");
+      if (!Number.isFinite(rank) || rank <= 0) return jsonError(res, 400, "BAD_RANK");
+      if (rank > 255) return jsonError(res, 400, "RANK_TOO_HIGH");
 
-      // Allow rank 0? Roblox setRank expects 1..255 usually. Keep your old behavior: rank must be > 0.
-      if (!Number.isFinite(rank) || rank <= 0) return res.status(400).json({ ok: false, error: "BAD_RANK" });
-
-      // extra guard: Roblox group ranks are 1..255 (safe clamp check, not rewriting your logic)
-      if (rank > 255) return res.status(400).json({ ok: false, error: "RANK_TOO_HIGH" });
-
-      // bot-side spam shield
       const k = `${lic.placeId}:${groupId}:${userId}`;
-      const now = Date.now();
-      const last = LAST_SYNC_AT.get(k) || 0;
-      if (now - last < BOT_SYNC_COOLDOWN_MS) {
+      if (inCooldown(k)) {
         return res.status(429).json({ ok: false, error: "BOT_COOLDOWN" });
       }
-      LAST_SYNC_AT.set(k, now);
 
-      // log every setrank (helps you confirm demotion calls)
       console.log(`📌 /setrank placeId=${lic.placeId} groupId=${groupId} userId=${userId} -> rank=${rank}`);
 
       try {
+        // 1) Validate requested rank exists in this group
+        const validRanks = await getGroupRanks(groupId);
+        if (!validRanks.has(rank)) {
+          return jsonError(res, 400, "ROLE_NOT_FOUND", { rank });
+        }
+
+        // 2) Check bot's own rank in group (prevents "bot can't set same/higher")
+        if (BOT_USER_ID) {
+          const botRank = await rbx.getRankInGroup(groupId, BOT_USER_ID);
+          // If rank is same or higher than bot, block.
+          if (Number.isFinite(botRank) && botRank > 0 && rank >= botRank) {
+            return jsonError(res, 403, "INSUFFICIENT_BOT_RANK", { botRank, requestedRank: rank });
+          }
+        }
+
+        // 3) Check target current rank (avoid spam + "same role" errors)
+        const currentRank = await rbx.getRankInGroup(groupId, userId);
+        if (currentRank === rank) {
+          return res.json({ ok: true, success: true, ignored: "SAME_ROLE" });
+        }
+
+        // 4) Apply
         await rbx.setRank(groupId, userId, rank);
-        return res.json({ ok: true, success: true });
+        return res.json({ ok: true, success: true, from: currentRank, to: rank });
       } catch (err) {
+        const msg = err?.message || String(err);
+
+        // "ignore" common non-fatal cases (anti-crash)
+        if (isSameRoleErrorMessage(msg)) {
+          return res.json({ ok: true, success: true, ignored: "SAME_ROLE" });
+        }
+        if (isRoleNotFoundMessage(msg)) {
+          return jsonError(res, 400, "ROLE_NOT_FOUND", { message: msg });
+        }
+        if (isPermissionMessage(msg)) {
+          return jsonError(res, 403, "PERMISSION_DENIED", { message: msg });
+        }
+
         console.error("❌ Failed to set rank:", err);
         return res.status(500).json({
           ok: false,
           error: "SETRANK_FAILED",
-          message: err?.message || String(err),
+          message: msg,
         });
       }
     });
