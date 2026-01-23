@@ -74,6 +74,12 @@ function requireLicense(req, res) {
 }
 
 //======================================================
+// **OPTIONAL BOT-SIDE SYNC COOLDOWN** (anti-spam safety)
+// Server should still enforce cooldown, this is just a backup.
+const LAST_SYNC_AT = new Map(); // `${placeId}:${groupId}:${userId}` -> ms
+const BOT_SYNC_COOLDOWN_MS = 1500; // 1.5s (tiny, just blocks accidental spam)
+
+//======================================================
 // **BOOT**
 //======================================================
 rbx
@@ -101,14 +107,17 @@ rbx
         });
       }
 
-      return res.json({ ok: true });
+      // small extra info for debugging (doesn't break anything)
+      return res.json({ ok: true, boundPlaceId: placeId });
     });
 
     //==================================================
     // **/setrank** (LICENSE PROTECTED) — EXP -> GROUP RANK SYNC
+    // Works for BOTH promotion + demotion (lower rank is allowed)
     //==================================================
     app.get("/setrank", async (req, res) => {
-      if (!requireLicense(req, res)) return;
+      const lic = requireLicense(req, res);
+      if (!lic) return;
 
       const userId = Number(req.query.userid);
       const rank = Number(req.query.rank);
@@ -117,7 +126,24 @@ rbx
       // **PARAM GUARD**
       if (!Number.isFinite(userId) || userId <= 0) return res.status(400).json({ ok: false, error: "BAD_USERID" });
       if (!Number.isFinite(groupId) || groupId <= 0) return res.status(400).json({ ok: false, error: "BAD_GROUPID" });
+
+      // Allow rank 0? Roblox setRank expects 1..255 usually. Keep your old behavior: rank must be > 0.
       if (!Number.isFinite(rank) || rank <= 0) return res.status(400).json({ ok: false, error: "BAD_RANK" });
+
+      // extra guard: Roblox group ranks are 1..255 (safe clamp check, not rewriting your logic)
+      if (rank > 255) return res.status(400).json({ ok: false, error: "RANK_TOO_HIGH" });
+
+      // bot-side spam shield
+      const k = `${lic.placeId}:${groupId}:${userId}`;
+      const now = Date.now();
+      const last = LAST_SYNC_AT.get(k) || 0;
+      if (now - last < BOT_SYNC_COOLDOWN_MS) {
+        return res.status(429).json({ ok: false, error: "BOT_COOLDOWN" });
+      }
+      LAST_SYNC_AT.set(k, now);
+
+      // log every setrank (helps you confirm demotion calls)
+      console.log(`📌 /setrank placeId=${lic.placeId} groupId=${groupId} userId=${userId} -> rank=${rank}`);
 
       try {
         await rbx.setRank(groupId, userId, rank);
