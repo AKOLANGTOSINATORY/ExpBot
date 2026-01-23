@@ -1,5 +1,5 @@
-// index.js (EXP BOT ONLY) — License keys (one-key-per-placeId) + EXP rank sync routes (setrank/promote)
-// ✅ Removed: gamepass route, rate limit, axios, Cronitor, extra safety wrappers
+// index.js (EXP BOT ONLY) — License keys (one-key-per-placeId) + EXP rank sync route (SETRANK ONLY)
+// ✅ Removed: /promote, gamepass route, rate limit, axios, Cronitor, extra wrappers
 // ✅ Keep it SIMPLE + separated for EXP bot only
 
 const express = require("express");
@@ -14,8 +14,9 @@ const app = express();
 // **ENV**
 //======================================================
 const COOKIE = process.env.COOKIE;
+
 if (!COOKIE) {
-  console.error("❌ Missing COOKIE in environment variables");
+  console.error("❌ Missing **COOKIE** in environment variables");
   process.exit(1);
 }
 
@@ -48,7 +49,7 @@ function validateKeyForPlace(key, placeId) {
 
   if (!bound) {
     KEY_BINDINGS.set(key, placeId);
-    console.log(`🔐 Key bound to PlaceId ${placeId}`);
+    console.log(`🔐 Key bound to **PlaceId ${placeId}**`);
     return { ok: true };
   }
 
@@ -81,11 +82,12 @@ rbx
     console.log("✅ Logged in to Roblox");
 
     app.get("/", (req, res) => {
-      res.send("EXP Ranker is alive!");
+      res.send("EXP Bot is alive!");
     });
 
     //==================================================
     // **/validate** (license bind on boot)
+    // Roblox calls this once when the server boots
     //==================================================
     app.get("/validate", (req, res) => {
       const key = String(req.query.key ?? "");
@@ -103,47 +105,30 @@ rbx
     });
 
     //==================================================
-    // **/setrank** (LICENSE PROTECTED)
+    // **/setrank** (LICENSE PROTECTED) — EXP -> GROUP RANK SYNC
     //==================================================
     app.get("/setrank", async (req, res) => {
       if (!requireLicense(req, res)) return;
 
-      const userId = parseInt(req.query.userid, 10);
-      const rank = parseInt(req.query.rank, 10);
-      const groupId = parseInt(req.query.groupid, 10);
+      const userId = Number(req.query.userid);
+      const rank = Number(req.query.rank);
+      const groupId = Number(req.query.groupid);
 
-      if (!Number.isFinite(userId) || !Number.isFinite(rank) || !Number.isFinite(groupId)) {
-        return res.status(400).json({ ok: false, error: "BAD_PARAMS" });
-      }
+      // **PARAM GUARD**
+      if (!Number.isFinite(userId) || userId <= 0) return res.status(400).json({ ok: false, error: "BAD_USERID" });
+      if (!Number.isFinite(groupId) || groupId <= 0) return res.status(400).json({ ok: false, error: "BAD_GROUPID" });
+      if (!Number.isFinite(rank) || rank <= 0) return res.status(400).json({ ok: false, error: "BAD_RANK" });
 
       try {
         await rbx.setRank(groupId, userId, rank);
         return res.json({ ok: true, success: true });
       } catch (err) {
         console.error("❌ Failed to set rank:", err);
-        return res.status(500).json({ ok: false, error: "SETRANK_FAILED", message: err.message });
-      }
-    });
-
-    //==================================================
-    // **/promote** (LICENSE PROTECTED)
-    //==================================================
-    app.get("/promote", async (req, res) => {
-      if (!requireLicense(req, res)) return;
-
-      const userId = parseInt(req.query.userid, 10);
-      const groupId = parseInt(req.query.groupid, 10);
-
-      if (!Number.isFinite(userId) || !Number.isFinite(groupId)) {
-        return res.status(400).json({ ok: false, error: "BAD_PARAMS" });
-      }
-
-      try {
-        await rbx.promote(groupId, userId);
-        return res.json({ ok: true, success: true });
-      } catch (err) {
-        console.error("❌ Failed to promote:", err);
-        return res.status(500).json({ ok: false, error: "PROMOTE_FAILED", message: err.message });
+        return res.status(500).json({
+          ok: false,
+          error: "SETRANK_FAILED",
+          message: err?.message || String(err),
+        });
       }
     });
 
@@ -152,7 +137,7 @@ rbx
     //==================================================
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => {
-      console.log(`🚀 Server is running on port ${PORT}`);
+      console.log(`🚀 Server is running on port **${PORT}**`);
     });
   })
   .catch((err) => {
