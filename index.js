@@ -70,7 +70,7 @@ function requireLicense(req, res) {
 // OPTIONAL BOT-SIDE SYNC COOLDOWN
 //======================================================
 const LAST_SYNC_AT = new Map(); 
-const BOT_SYNC_COOLDOWN_MS = 0; // set 0 for no delay 
+const BOT_SYNC_COOLDOWN_MS = 0; 
 
 function inCooldown(k) {
     if (BOT_SYNC_COOLDOWN_MS <= 0) return false;
@@ -82,10 +82,10 @@ function inCooldown(k) {
 }
 
 //======================================================
-// Group roles cache (To avoid spamming Roblox API)
+// Group roles cache
 //======================================================
 const ROLE_CACHE = new Map();
-const ROLE_CACHE_TTL_MS = 60_000; // 60s
+const ROLE_CACHE_TTL_MS = 60_000; 
 
 async function getGroupRoles(groupId) {
     const now = Date.now();
@@ -135,7 +135,6 @@ app.get("/setrank", async (req, res) => {
     const rank = Number(req.query.rank);
     const groupId = Number(req.query.groupid);
 
-    // PARAM GUARD
     if (!Number.isFinite(userId) || userId <= 0) return jsonError(res, 400, "BAD_USERID");
     if (!Number.isFinite(groupId) || groupId <= 0) return jsonError(res, 400, "BAD_GROUPID");
     if (!Number.isFinite(rank) || rank <= 0) return jsonError(res, 400, "BAD_RANK");
@@ -146,8 +145,6 @@ app.get("/setrank", async (req, res) => {
         return res.status(429).json({ ok: false, error: "BOT_COOLDOWN" });
     }
 
-    console.log(`📌 /setrank placeId=${lic.placeId} groupId=${groupId} userId=${userId} -> rank=${rank}`);
-
     try {
         // 1) Fetch roles and translate 0-255 Rank to actual Role ID
         const roles = await getGroupRoles(groupId);
@@ -157,11 +154,23 @@ app.get("/setrank", async (req, res) => {
             return jsonError(res, 400, "ROLE_NOT_FOUND", { rank });
         }
 
-        // 2) Open Cloud V2 Rank Change Request
+        const rolePath = `groups/${groupId}/roles/${targetRole.id}`;
         const url = `https://apis.roblox.com/cloud/v2/groups/${groupId}/memberships/${userId}`;
-        
+
+        // 2) PRE-CHECK: Is the user already this role? (Prevents HTTP 400 Spam)
+        try {
+            const currentMembership = await axios.get(url, { headers: { "x-api-key": ROBLOX_API_KEY } });
+            if (currentMembership.data && currentMembership.data.role === rolePath) {
+                console.log(`⚡ User ${userId} is already Rank ${rank}. Skipping request.`);
+                return res.json({ ok: true, success: true, ignored: "SAME_ROLE" });
+            }
+        } catch (checkErr) {
+            // Ignore GET errors, let PATCH handle real issues
+        }
+
+        // 3) Open Cloud V2 Rank Change Request
         await axios.patch(url, 
-            { role: `groups/${groupId}/roles/${targetRole.id}` }, 
+            { role: rolePath }, 
             {
                 headers: {
                     "x-api-key": ROBLOX_API_KEY,
@@ -170,15 +179,20 @@ app.get("/setrank", async (req, res) => {
             }
         );
 
+        console.log(`✅ Success: User ${userId} ranked up to ${targetRole.name}`);
         return res.json({ ok: true, success: true, message: "Rank updated", targetRole: targetRole.name });
 
     } catch (err) {
         const errorData = err.response?.data || err.message;
         const status = err.response?.status || 500;
 
-        // Open Cloud natively throws specific errors we can catch
+        // If Open Cloud still throws a 400 for some other reason, gently return 200 to Lua so it stops looping
+        if (status === 400) {
+            return res.json({ ok: true, success: true, ignored: "ROBLOX_400_HANDLED" });
+        }
+        
         if (status === 403) {
-            return jsonError(res, 403, "PERMISSION_DENIED", { details: "The API Key does not have permission to rank this user." });
+            return jsonError(res, 403, "PERMISSION_DENIED", { details: "API Key lacks permissions." });
         }
 
         console.error("❌ Failed to set rank:", errorData);
